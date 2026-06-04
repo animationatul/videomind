@@ -19,6 +19,12 @@ from "../pipeline/CollageGenerator.js";
 import { LlmAnalyzer }
 from "../pipeline/LlmAnalyzer.js";
 
+import { TranscriptExtractor }
+from "../pipeline/TranscriptExtractor.js";
+
+import { TimelineMerger }
+from "../pipeline/TimelineMerger.js";
+
 export class VideoMind {
 
     constructor(options = {}) {
@@ -30,6 +36,22 @@ export class VideoMind {
         this.temp =
             new TempManager();
 
+        this.videoFolder =
+            "./assets/videos";
+
+        this.vafFolder =
+            "./assets/vaf";
+
+    }
+
+    setVideoFolder(folderPath) {
+        this.videoFolder = folderPath;
+        return this;
+    }
+
+    setVafFolder(folderPath) {
+        this.vafFolder = folderPath;
+        return this;
     }
 
     async analyze(videoPath) {
@@ -41,49 +63,102 @@ export class VideoMind {
             `\nAnalyzing: ${videoPath}\n`
         );
 
-        const scenes =
-            await new SceneDetector()
-                .detect(videoPath);
-                console.log(
-                    JSON.stringify(
-                        scenes,
-                        null,
-                        2
-                    )
-                );
+        /*
+        ----------------------------------
+        STEP 1: EXTRACT AUDIO
+        ----------------------------------
+        */
+
+        const audio =
+            await new AudioExtractor(
+                job.audioPath
+            ).extract(videoPath);
+
+        /*
+        ----------------------------------
+        STEP 2+3: TRANSCRIBE + SCENE DETECT
+        (parallel — both independent)
+        ----------------------------------
+        */
+
+        const [
+            transcript,
+            scenes,
+            metadata
+        ] = await Promise.all([
+            new TranscriptExtractor()
+                .extract(audio.audio),
+
+            new SceneDetector()
+                .detect(videoPath),
+
+            new SceneDetector()
+                .getMetadata(videoPath)
+        ]);
+
+        console.log(
+            `Transcript segments: ${transcript.segments.length}`
+        );
+
+        console.log(
+            `Visual scenes: ${scenes.sceneCount}`
+        );
+
+        /*
+        ----------------------------------
+        STEP 4: MERGE INTO UNIFIED TIMELINE
+        ----------------------------------
+        */
+
+        const timeline =
+            new TimelineMerger().merge(
+                transcript.segments,
+                scenes.scenes
+            );
+
+        console.log(
+            `Timeline segments: ${timeline.length}`
+        );
+
+        /*
+        ----------------------------------
+        STEP 5: EXTRACT FRAMES
+        ----------------------------------
+        */
+
         const frames =
             await new FrameExtractor(
                 job.framesPath
             ).extract(
                 videoPath,
-                scenes.scenes
+                timeline
             );
+
+        /*
+        ----------------------------------
+        STEP 6: GENERATE COLLAGE
+        ----------------------------------
+        */
 
         await new CollageGenerator({
-            output:
-                job.collagePath
-        }).generate(
-            frames.frames
-        );
+            output: job.collagePath
+        }).generate(frames.frames);
 
-        const audio =
-            await new AudioExtractor(
-                job.audioPath
-            ).extract(
-                videoPath
-            );
+        /*
+        ----------------------------------
+        STEP 7: FINAL LLM ANALYSIS → VAF
+        ----------------------------------
+        */
 
-        const result =
+        const vaf =
             await new LlmAnalyzer()
                 .analyze({
                     collagePath:
                         job.collagePath,
-
-                    audioPath:
-                        audio.audio,
-
-                    sceneData:
-                        scenes
+                    timeline,
+                    transcript,
+                    metadata,
+                    videoPath
                 });
 
         /*
@@ -98,25 +173,20 @@ export class VideoMind {
                 path.extname(videoPath)
             );
 
-        const vafDir =
-            "./assets/vaf";
-
         fs.mkdirSync(
-            vafDir,
-            {
-                recursive: true
-            }
+            this.vafFolder,
+            { recursive: true }
         );
 
         const vafPath =
             path.join(
-                vafDir,
+                this.vafFolder,
                 `${fileName}.vaf.json`
             );
 
         fs.writeFileSync(
             vafPath,
-            result,
+            JSON.stringify(vaf, null, 2),
             "utf8"
         );
 
@@ -130,167 +200,142 @@ export class VideoMind {
         ----------------------------------
         */
 
-        if (
-            !this.keepTempFiles
-        ) {
+        if (!this.keepTempFiles) {
 
-            this.temp.cleanJob(
-                job.path
-            );
+            this.temp.cleanJob(job.path);
 
         }
 
         return {
-            video:
-                videoPath,
-
-            vaf:
-                vafPath
+            video: videoPath,
+            vaf: vafPath
         };
 
     }
 
-
     async analyzeAssets(options = {}) {
 
-    const videosFolder =
-        options.videosFolder ??
-        "./assets/videos";
+        const overwrite =
+            options.overwrite ?? false;
 
-    const overwrite =
-        options.overwrite ??
-        false;
-
-    const files =
-        fs.readdirSync(
-            videosFolder
-        );
-
-    const videoFiles =
-        files.filter(file => {
-
-            const ext =
-                path.extname(file)
-                    .toLowerCase();
-
-            return [
-                ".mp4",
-                ".mov",
-                ".mkv",
-                ".avi",
-                ".webm"
-            ].includes(ext);
-
-        });
-
-    const results = [];
-
-    for (const file of videoFiles) {
-
-        const videoPath =
-            path.join(
-                videosFolder,
-                file
+        const files =
+            fs.readdirSync(
+                this.videoFolder
             );
 
-        const fileName =
-            path.basename(
-                file,
-                path.extname(file)
-            );
+        const videoFiles =
+            files.filter(file => {
 
-        const vafPath =
-            path.join(
-                "./assets/vaf",
-                `${fileName}.vaf.json`
-            );
+                const ext =
+                    path.extname(file)
+                        .toLowerCase();
 
-        if (
-            !overwrite &&
-            fs.existsSync(
-                vafPath
-            )
-        ) {
+                return [
+                    ".mp4",
+                    ".mov",
+                    ".mkv",
+                    ".avi",
+                    ".webm"
+                ].includes(ext);
 
-            console.log(
-                `Skipping ${file} (VAF exists)`
-            );
-
-            results.push({
-                video:
-                    videoPath,
-
-                vaf:
-                    vafPath,
-
-                status:
-                    "skipped"
             });
 
-            continue;
-        }
+        const results = [];
 
-        console.log(
-            `Processing ${file}`
-        );
+        for (const file of videoFiles) {
 
-        try {
-
-            const result =
-                await this.analyze(
-                    videoPath
+            const videoPath =
+                path.join(
+                    this.videoFolder,
+                    file
                 );
 
-            results.push({
-                ...result,
-                status:
-                    "completed"
-            });
+            const fileName =
+                path.basename(
+                    file,
+                    path.extname(file)
+                );
 
-        }
-        catch (error) {
+            const vafPath =
+                path.join(
+                    this.vafFolder,
+                    `${fileName}.vaf.json`
+                );
 
-            console.error(
-                `Failed: ${file}`
+            if (
+                !overwrite &&
+                fs.existsSync(vafPath)
+            ) {
+
+                console.log(
+                    `Skipping ${file} (VAF exists)`
+                );
+
+                results.push({
+                    video: videoPath,
+                    vaf: vafPath,
+                    status: "skipped"
+                });
+
+                continue;
+            }
+
+            console.log(
+                `Processing ${file}`
             );
 
-            results.push({
-                video:
-                    videoPath,
+            try {
 
-                status:
-                    "failed",
+                const result =
+                    await this.analyze(
+                        videoPath
+                    );
 
-                error:
+                results.push({
+                    ...result,
+                    status: "completed"
+                });
+
+            }
+            catch (error) {
+
+                console.error(
+                    `Failed: ${file}`,
                     error.message
-            });
+                );
+
+                results.push({
+                    video: videoPath,
+                    status: "failed",
+                    error: error.message
+                });
+
+            }
 
         }
 
+        return {
+            total:
+                videoFiles.length,
+
+            processed:
+                results.filter(
+                    x => x.status === "completed"
+                ).length,
+
+            skipped:
+                results.filter(
+                    x => x.status === "skipped"
+                ).length,
+
+            failed:
+                results.filter(
+                    x => x.status === "failed"
+                ).length,
+
+            results
+        };
+
     }
-
-    return {
-        total:
-            videoFiles.length,
-
-        processed:
-            results.filter(
-                x => x.status === "completed"
-            ).length,
-
-        skipped:
-            results.filter(
-                x => x.status === "skipped"
-            ).length,
-
-        failed:
-            results.filter(
-                x => x.status === "failed"
-            ).length,
-
-        results
-    };
-
-}
 
 }

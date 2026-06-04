@@ -8,9 +8,11 @@ export class FrameExtractor {
         this.outputDir = outputDir;
     }
 
-    async extract(videoPath, scenes) {
+    async extract(videoPath, timeline) {
 
-        if (!fs.existsSync(this.outputDir)) {
+        if (
+            !fs.existsSync(this.outputDir)
+        ) {
             fs.mkdirSync(
                 this.outputDir,
                 { recursive: true }
@@ -19,30 +21,35 @@ export class FrameExtractor {
 
         const frames = [];
 
-        for (const scene of scenes) {
+        for (const segment of timeline) {
 
-            const sceneFrames = [
+            const endTime = Math.max(
+                segment.start + 0.1,
+                segment.end - 0.1
+            );
+
+            const segmentFrames = [
                 {
                     type: "start",
-                    time: scene.start
+                    time: segment.start
                 },
                 {
                     type: "middle",
                     time:
-                        (scene.start + scene.end) / 2
+                        (segment.start + segment.end) / 2
                 },
                 {
                     type: "end",
-                    time: scene.end
+                    time: endTime
                 }
             ];
 
-            for (const frame of sceneFrames) {
+            for (const frame of segmentFrames) {
 
                 const outputFile =
                     path.join(
                         this.outputDir,
-                        `scene_${scene.id}_${frame.type}.jpg`
+                        `segment_${segment.index}_${frame.type}.jpg`
                     );
 
                 await this.extractFrame(
@@ -50,7 +57,10 @@ export class FrameExtractor {
                     frame.time,
                     outputFile
                 );
-                if (!fs.existsSync(outputFile)) {
+
+                if (
+                    !fs.existsSync(outputFile)
+                ) {
 
                     console.log(
                         `Frame not created: ${outputFile}`
@@ -62,10 +72,6 @@ export class FrameExtractor {
                 const stats =
                     fs.statSync(outputFile);
 
-                console.log(
-                    `Frame: ${outputFile} Size: ${stats.size}`
-                );
-
                 if (stats.size === 0) {
 
                     console.log(
@@ -74,23 +80,36 @@ export class FrameExtractor {
 
                     continue;
                 }
+
+                console.log(
+                    `Frame: ${outputFile} Size: ${stats.size}`
+                );
+
                 frames.push({
-                    sceneId: scene.id,
-                    sceneName: `Scene ${scene.id}`,
+                    segmentIndex:
+                        segment.index,
 
-                    sceneStart: scene.start,
-                    sceneEnd: scene.end,
+                    segmentStart:
+                        segment.start,
 
-                    frameType: frame.type,
+                    segmentEnd:
+                        segment.end,
+
+                    segmentSpeaker:
+                        segment.speaker ?? null,
+
+                    segmentDialogue:
+                        segment.dialogue ?? null,
+
+                    frameType:
+                        frame.type,
 
                     timestamp: Number(
                         frame.time.toFixed(3)
                     ),
 
                     timestampFormatted:
-                        this.formatTime(
-                            frame.time
-                        ),
+                        this.formatTime(frame.time),
 
                     file: outputFile
                 });
@@ -130,7 +149,6 @@ export class FrameExtractor {
                 ffmpeg.on(
                     "close",
                     (code) => {
-
                         if (code === 0) {
                             resolve();
                         } else {
@@ -140,7 +158,6 @@ export class FrameExtractor {
                                 )
                             );
                         }
-
                     }
                 );
 
@@ -151,7 +168,6 @@ export class FrameExtractor {
 
             }
         );
-
     }
 
     formatTime(seconds) {
@@ -165,8 +181,7 @@ export class FrameExtractor {
             );
 
         const secs =
-            (seconds % 60)
-                .toFixed(3);
+            (seconds % 60).toFixed(3);
 
         return `${hrs
             .toString()

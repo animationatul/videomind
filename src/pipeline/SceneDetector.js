@@ -274,4 +274,106 @@ export class SceneDetector {
 
     }
 
+    async getMetadata(videoPath) {
+
+        return new Promise(
+            (resolve, reject) => {
+
+                const ffprobe =
+                    spawn(
+                        "ffprobe",
+                        [
+                            "-v",
+                            "error",
+                            "-show_entries",
+                            "stream=width,height,r_frame_rate,codec_type:format=duration",
+                            "-of",
+                            "json",
+                            videoPath
+                        ]
+                    );
+
+                let output = "";
+
+                ffprobe.stdout.on(
+                    "data",
+                    data => {
+                        output +=
+                            data.toString();
+                    }
+                );
+
+                ffprobe.on(
+                    "close",
+                    () => {
+
+                        try {
+
+                            const info =
+                                JSON.parse(output);
+
+                            const videoStream =
+                                info.streams.find(
+                                    s => s.codec_type === "video"
+                                );
+
+                            const audioStream =
+                                info.streams.find(
+                                    s => s.codec_type === "audio"
+                                );
+
+                            let fps = 0;
+
+                            if (
+                                videoStream?.r_frame_rate
+                            ) {
+
+                                const [num, den] =
+                                    videoStream.r_frame_rate
+                                        .split("/");
+
+                                fps = Math.round(
+                                    parseInt(num) /
+                                    parseInt(den)
+                                );
+
+                            }
+
+                            resolve({
+                                duration: Number(
+                                    parseFloat(
+                                        info.format?.duration ?? 0
+                                    ).toFixed(3)
+                                ),
+
+                                resolution: videoStream
+                                    ? `${videoStream.width}x${videoStream.height}`
+                                    : null,
+
+                                fps,
+
+                                has_audio:
+                                    !!audioStream
+                            });
+
+                        }
+                        catch (err) {
+
+                            reject(err);
+
+                        }
+
+                    }
+                );
+
+                ffprobe.on(
+                    "error",
+                    reject
+                );
+
+            }
+        );
+
+    }
+
 }

@@ -1,6 +1,16 @@
 import sharp from "sharp";
 import fs from "fs";
 
+function escapeXml(str) {
+    if (!str) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
+}
+
 export class CollageGenerator {
 
     constructor(options = {}) {
@@ -20,23 +30,21 @@ export class CollageGenerator {
 
     async generate(frames) {
 
-        const scenes =
-            this.groupByScene(
-                frames
-            );
+        const segments =
+            this.groupBySegment(frames);
 
-        const sceneBuffers = [];
+        const segmentBuffers = [];
 
         let totalHeight = 0;
         let maxWidth = 0;
 
-        for (const scene of scenes) {
+        for (const segment of segments) {
 
             try {
 
                 const buffer =
-                    await this.createSceneRow(
-                        scene
+                    await this.createSegmentRow(
+                        segment
                     );
 
                 if (!buffer) {
@@ -53,7 +61,7 @@ export class CollageGenerator {
                 ) {
 
                     console.warn(
-                        "Invalid scene buffer"
+                        "Invalid segment buffer"
                     );
 
                     continue;
@@ -69,19 +77,17 @@ export class CollageGenerator {
                         metadata.width
                     );
 
-                sceneBuffers.push({
+                segmentBuffers.push({
                     buffer,
-                    width:
-                        metadata.width,
-                    height:
-                        metadata.height
+                    width: metadata.width,
+                    height: metadata.height
                 });
 
             }
             catch (error) {
 
                 console.error(
-                    "Scene generation failed:"
+                    "Segment generation failed:"
                 );
 
                 console.error(
@@ -92,34 +98,27 @@ export class CollageGenerator {
 
         }
 
-        if (
-            sceneBuffers.length === 0
-        ) {
+        if (segmentBuffers.length === 0) {
 
             throw new Error(
-                "No valid scene images generated"
+                "No valid segment images generated"
             );
 
         }
 
         const composites = [];
-
         let currentY = 0;
 
-        for (
-            const scene of sceneBuffers
-        ) {
+        for (const seg of segmentBuffers) {
 
             composites.push({
-                input:
-                    scene.buffer,
+                input: seg.buffer,
                 left: 0,
                 top: currentY
             });
 
             currentY +=
-                scene.height +
-                this.sceneGap;
+                seg.height + this.sceneGap;
         }
 
         await sharp({
@@ -134,70 +133,45 @@ export class CollageGenerator {
                 }
             }
         })
-            .composite(
-                composites
-            )
-            .jpeg({
-                quality: 95
-            })
-            .toFile(
-                this.output
-            );
+            .composite(composites)
+            .jpeg({ quality: 95 })
+            .toFile(this.output);
 
         return {
-            collage:
-                this.output,
-            sceneCount:
-                scenes.length
+            collage: this.output,
+            segmentCount: segments.length
         };
     }
 
-    groupByScene(frames) {
+    groupBySegment(frames) {
 
-        const map =
-            new Map();
+        const map = new Map();
 
         for (const frame of frames) {
 
             if (
-                !map.has(
-                    frame.sceneId
-                )
+                !map.has(frame.segmentIndex)
             ) {
-
                 map.set(
-                    frame.sceneId,
+                    frame.segmentIndex,
                     []
                 );
-
             }
 
-            map.get(
-                frame.sceneId
-            ).push(
-                frame
-            );
-
+            map.get(frame.segmentIndex)
+                .push(frame);
         }
 
         return [...map.values()];
     }
 
-    async createSceneRow(
-        sceneFrames
-    ) {
+    async createSegmentRow(segmentFrames) {
 
         const validFrames = [];
 
-        for (
-            const frame of sceneFrames
-        ) {
+        for (const frame of segmentFrames) {
 
-            if (
-                !fs.existsSync(
-                    frame.file
-                )
-            ) {
+            if (!fs.existsSync(frame.file)) {
 
                 console.warn(
                     `Missing frame: ${frame.file}`
@@ -207,13 +181,9 @@ export class CollageGenerator {
             }
 
             const stats =
-                fs.statSync(
-                    frame.file
-                );
+                fs.statSync(frame.file);
 
-            if (
-                stats.size === 0
-            ) {
+            if (stats.size === 0) {
 
                 console.warn(
                     `Empty frame: ${frame.file}`
@@ -222,59 +192,72 @@ export class CollageGenerator {
                 continue;
             }
 
-            validFrames.push(
-                frame
-            );
+            validFrames.push(frame);
         }
 
-        if (
-            validFrames.length === 0
-        ) {
+        if (validFrames.length === 0) {
 
             console.warn(
-                "No valid frames found for scene"
+                "No valid frames for segment"
             );
 
             return null;
         }
 
-        const first =
-            validFrames[0];
+        const first = validFrames[0];
 
         const rowWidth =
-            this.frameWidth *
-            validFrames.length;
+            this.frameWidth * validFrames.length;
+
+        const headerHeight = 80;
 
         const rowHeight =
-            this.frameHeight + 80;
+            this.frameHeight + headerHeight;
+
+        const speakerText =
+            first.segmentSpeaker
+                ? escapeXml(first.segmentSpeaker)
+                : "";
+
+        const dialogueText =
+            first.segmentDialogue
+                ? `"${escapeXml(
+                    first.segmentDialogue.slice(0, 60)
+                )}${first.segmentDialogue.length > 60 ? "..." : ""}"`
+                : "";
 
         const headerSvg = `
-        <svg width="${rowWidth}" height="80">
+        <svg width="${rowWidth}" height="${headerHeight}">
 
             <rect
                 width="100%"
                 height="100%"
-                fill="#f0f0f0"/>
+                fill="#1a1a2e"/>
 
             <text
-                x="20"
-                y="30"
-                font-size="24"
-                font-weight="bold">
-
-                ${first.sceneName}
-
+                x="16"
+                y="22"
+                font-size="18"
+                font-weight="bold"
+                fill="#e0e0e0">
+                Segment ${first.segmentIndex}
             </text>
 
             <text
-                x="20"
-                y="60"
-                font-size="18">
+                x="16"
+                y="44"
+                font-size="13"
+                fill="#a0a0b0">
+                ${first.segmentStart.toFixed(2)}s &rarr; ${first.segmentEnd.toFixed(2)}s
+                ${speakerText ? `&#160;&#160;|&#160;&#160;${speakerText}` : ""}
+            </text>
 
-                ${first.sceneStart.toFixed(2)}s
-                →
-                ${first.sceneEnd.toFixed(2)}s
-
+            <text
+                x="16"
+                y="65"
+                font-size="12"
+                fill="#c0c0c0">
+                ${dialogueText}
             </text>
 
         </svg>
@@ -283,9 +266,7 @@ export class CollageGenerator {
         const composites = [
             {
                 input:
-                    Buffer.from(
-                        headerSvg
-                    ),
+                    Buffer.from(headerSvg),
                 left: 0,
                 top: 0
             }
@@ -297,8 +278,7 @@ export class CollageGenerator {
             i++
         ) {
 
-            const frame =
-                validFrames[i];
+            const frame = validFrames[i];
 
             console.log(
                 "Processing frame:",
@@ -310,19 +290,13 @@ export class CollageGenerator {
             try {
 
                 image =
-                    await sharp(
-                        frame.file
-                    )
+                    await sharp(frame.file)
                         .resize({
                             width:
                                 this.frameWidth,
-
                             height:
-                                this.frameHeight -
-                                40,
-
+                                this.frameHeight - 40,
                             fit: "contain",
-
                             background: {
                                 r: 255,
                                 g: 255,
@@ -358,7 +332,7 @@ export class CollageGenerator {
                 <text
                     x="10"
                     y="25"
-                    font-size="16"
+                    font-size="14"
                     font-weight="bold">
 
                     ${frame.frameType.toUpperCase()}
@@ -368,23 +342,18 @@ export class CollageGenerator {
             </svg>
             `;
 
-            const x =
-                i *
-                this.frameWidth;
+            const x = i * this.frameWidth;
 
             composites.push({
-                input:
-                    Buffer.from(
-                        labelSvg
-                    ),
+                input: Buffer.from(labelSvg),
                 left: x,
-                top: 80
+                top: headerHeight
             });
 
             composites.push({
                 input: image,
                 left: x,
-                top: 120
+                top: headerHeight + 40
             });
 
         }
@@ -401,12 +370,8 @@ export class CollageGenerator {
                 }
             }
         })
-            .composite(
-                composites
-            )
-            .jpeg({
-                quality: 95
-            })
+            .composite(composites)
+            .jpeg({ quality: 95 })
             .toBuffer();
     }
 

@@ -248,8 +248,8 @@ export class CollageGenerator {
                 y="44"
                 font-size="13"
                 fill="#a0a0b0">
-                ${first.segmentStart.toFixed(2)}s &rarr; ${first.segmentEnd.toFixed(2)}s
-                ${speakerText ? `&#160;&#160;|&#160;&#160;${speakerText}` : ""}
+                ${first.segmentStart.toFixed(2)}s → ${first.segmentEnd.toFixed(2)}s
+                ${speakerText ? `  |  ${speakerText}` : ""}
             </text>
 
             <text

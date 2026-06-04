@@ -23,6 +23,11 @@ export class FrameExtractor {
 
         for (const segment of timeline) {
 
+            const endTime = Math.max(
+                segment.start + 0.1,
+                segment.end - 0.1
+            );
+
             const segmentFrames = [
                 {
                     type: "start",
@@ -35,7 +40,7 @@ export class FrameExtractor {
                 },
                 {
                     type: "end",
-                    time: segment.end
+                    time: endTime
                 }
             ];
 

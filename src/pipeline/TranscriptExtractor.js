@@ -91,15 +91,32 @@ export class TranscriptExtractor {
         }
         catch {
 
-            rawTranscript =
-                await this.client.audio.transcriptions.create({
-                    file:
-                        fs.createReadStream(audioPath),
-                    model:
-                        this.audioModel,
-                    response_format:
-                        "verbose_json"
-                });
+            try {
+
+                rawTranscript =
+                    await this.client.audio.transcriptions.create({
+                        file:
+                            fs.createReadStream(audioPath),
+                        model:
+                            this.audioModel,
+                        response_format:
+                            "verbose_json"
+                    });
+
+            }
+            catch {
+
+                rawTranscript =
+                    await this.client.audio.transcriptions.create({
+                        file:
+                            fs.createReadStream(audioPath),
+                        model:
+                            this.audioModel,
+                        response_format:
+                            "json"
+                    });
+
+            }
 
         }
 

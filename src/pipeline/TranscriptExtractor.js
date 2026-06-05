@@ -248,68 +248,49 @@ export class TranscriptExtractor {
     }
 
     /*
-    Splits plain text into segments at sentence-boundary punctuation.
-    Groups sentences until the proportional character-count reaches
-    the minSeconds target, then closes the segment.
+    Splits plain text into one segment per sentence.
+    Every strong punctuation mark (. ! ? । ॥ etc.) ends a segment.
+    Timestamps are assigned proportionally by character count.
     Returns: [{ text, start, end }, ...]
     */
-    segmentByPunctuation(text, totalDuration, minSeconds = 20) {
+    segmentByPunctuation(text, totalDuration) {
 
-        // Split on sentence-ending punctuation, keeping the delimiter
         const sentences = text
             .split(SENTENCE_SPLIT)
             .map(s => s.trim())
             .filter(s => s.length > 0);
 
-        const totalChars = text.length;
-        const segments = [];
-        let current = [];
-        let currentChars = 0;
-        let runningTime = 0;
+        if (sentences.length <= 1) {
 
-        const flush = (isLast) => {
-
-            if (current.length === 0) return;
-
-            const segText = current.join(" ").trim();
-            const segDuration =
-                (segText.length / totalChars) * totalDuration;
-
-            const start = Number(runningTime.toFixed(3));
-
-            const end = isLast
-                ? Number(totalDuration.toFixed(3))
-                : Number((runningTime + segDuration).toFixed(3));
-
-            segments.push({ text: segText, start, end });
-
-            runningTime = end;
-            current = [];
-            currentChars = 0;
-
-        };
-
-        for (let i = 0; i < sentences.length; i++) {
-
-            const s = sentences[i];
-            current.push(s);
-            currentChars += s.length;
-
-            const accumulated =
-                (currentChars / totalChars) * totalDuration;
-
-            const isLast = i === sentences.length - 1;
-            const endsAtBoundary = SENTENCE_END.test(s);
-
-            if (isLast) {
-                flush(true);
-            } else if (accumulated >= minSeconds && endsAtBoundary) {
-                flush(false);
-            }
+            return [{
+                text: text.trim(),
+                start: 0,
+                end: Number(totalDuration.toFixed(3))
+            }];
 
         }
 
-        return segments;
+        const totalChars = text.length;
+        let runningTime = 0;
+
+        return sentences.map((s, i) => {
+
+            const isLast = i === sentences.length - 1;
+            const segDuration = (s.length / totalChars) * totalDuration;
+            const start = Number(runningTime.toFixed(3));
+            const end = isLast
+                ? Number(totalDuration.toFixed(3))
+                : Number(
+                    Math.min(
+                        runningTime + segDuration,
+                        totalDuration
+                    ).toFixed(3)
+                );
+
+            runningTime = end;
+            return { text: s, start, end };
+
+        });
 
     }
 

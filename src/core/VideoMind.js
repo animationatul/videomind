@@ -65,9 +65,20 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 1: GET METADATA
-        Must run first — has_audio decides
-        whether audio extraction runs at all
+        STEP 1: EXTRACT AUDIO
+        ----------------------------------
+        */
+
+        const audio =
+            await new AudioExtractor(
+                job.audioPath
+            ).extract(videoPath);
+
+        /*
+        ----------------------------------
+        STEP 2: GET METADATA
+        (needed before transcription so
+        duration can anchor LLM segments)
         ----------------------------------
         */
 
@@ -77,53 +88,20 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 2: EXTRACT AUDIO
-        Skipped for videos with no audio
-        track (B-roll, timelapse, etc.)
-        ----------------------------------
-        */
-
-        let audio = null;
-
-        if (metadata.has_audio) {
-
-            audio =
-                await new AudioExtractor(
-                    job.audioPath
-                ).extract(videoPath);
-
-        }
-
-        /*
-        ----------------------------------
         STEP 3+4: TRANSCRIBE + SCENE DETECT
         (parallel — both independent)
-        Transcription skipped when no audio
         ----------------------------------
         */
-
-        const emptyTranscript = {
-            audio: null,
-            language: null,
-            duration: metadata.duration,
-            speakers: [],
-            has_speech: false,
-            segments: []
-        };
 
         const [
             transcript,
             scenes
         ] = await Promise.all([
-
-            metadata.has_audio
-                ? new TranscriptExtractor()
-                    .extract(audio.audio, metadata.duration)
-                : Promise.resolve(emptyTranscript),
+            new TranscriptExtractor()
+                .extract(audio.audio, metadata.duration),
 
             new SceneDetector()
                 .detect(videoPath)
-
         ]);
 
         console.log(
@@ -136,17 +114,14 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 5: MERGE INTO UNIFIED TIMELINE
-        Duration passed so the merger can
-        clamp the timeline to the real span
+        STEP 4: MERGE INTO UNIFIED TIMELINE
         ----------------------------------
         */
 
         const timeline =
             new TimelineMerger().merge(
                 transcript.segments,
-                scenes.scenes,
-                metadata.duration
+                scenes.scenes
             );
 
         console.log(
@@ -155,7 +130,7 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 6: EXTRACT FRAMES
+        STEP 5: EXTRACT FRAMES
         ----------------------------------
         */
 
@@ -169,7 +144,7 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 7: GENERATE COLLAGE
+        STEP 6: GENERATE COLLAGE
         ----------------------------------
         */
 
@@ -179,7 +154,7 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 8: FINAL LLM ANALYSIS → VAF
+        STEP 7: FINAL LLM ANALYSIS → VAF
         ----------------------------------
         */
 

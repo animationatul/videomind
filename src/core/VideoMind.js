@@ -76,24 +76,32 @@ export class VideoMind {
 
         /*
         ----------------------------------
-        STEP 2+3: TRANSCRIBE + SCENE DETECT
+        STEP 2: GET METADATA
+        (needed before transcription so
+        duration can anchor LLM segments)
+        ----------------------------------
+        */
+
+        const metadata =
+            await new SceneDetector()
+                .getMetadata(videoPath);
+
+        /*
+        ----------------------------------
+        STEP 3+4: TRANSCRIBE + SCENE DETECT
         (parallel — both independent)
         ----------------------------------
         */
 
         const [
             transcript,
-            scenes,
-            metadata
+            scenes
         ] = await Promise.all([
             new TranscriptExtractor()
-                .extract(audio.audio),
+                .extract(audio.audio, metadata.duration),
 
             new SceneDetector()
-                .detect(videoPath),
-
-            new SceneDetector()
-                .getMetadata(videoPath)
+                .detect(videoPath)
         ]);
 
         console.log(

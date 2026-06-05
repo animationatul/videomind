@@ -10,38 +10,68 @@ The LLM handles both segmentation and analysis since it has precise timing.
 */
 const ANALYSIS_SYSTEM_PROMPT = `You are a professional video transcript analyzer.
 
-You receive a raw transcript from an audio file and the total audio duration in seconds.
-Your job is to split the speech into multiple timed segments and return structured data for each one.
+You receive a raw transcript with word/segment timestamps and the total audio duration.
+Your job is to group the speech into timed segments and return structured data for each one.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SENTENCE BOUNDARIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Sentence-ending punctuation marks where a sentence ends:
+  . ! ? । ॥ ؟ ！ 。 ？
+
+These are the ONLY valid points to end a segment or detect a pause.
+Never cut mid-sentence. Never cut at a comma, colon, or semicolon.
+Use the word timestamps at these punctuation positions to get the exact time.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SEGMENTATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Use the provided word and segment timestamps to group content into segments.
-Break at sentence-ending punctuation: . ! ? । ॥ ؟ ！ 。 ？
-Target 20–60 seconds per segment. Never cut mid-sentence.
-First segment starts at 0.000. Last segment ends at [TOTAL_DURATION] exactly.
+Group sentences into segments of 20–60 seconds using word timestamps.
+Close a segment only when the accumulated duration reaches 20s AND the
+current sentence ends at a punctuation boundary listed above.
+First segment start = 0.000. Last segment end = [TOTAL_DURATION] exactly.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FOR EACH SEGMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. start / end       — from the timestamps
-2. speaker           — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
-3. dialogue          — clean: remove fillers, stammers, false starts
-4. raw_dialogue      — verbatim as spoken
-5. speech_events     — events within this segment's time window:
-     "stammer"     : syllable or word repetition
-     "false_start" : phrase abandoned mid-way
-     "retake"      : phrase repeated cleanly after a mistake
-     "filler"      : filler words/sounds ("um", "uh", "like", "you know")
-     "em_dash"     : hard abrupt mid-sentence stop (—)
-     "long_pause"  : silence gap > 0.8s within the segment
-     "breath"      : audible breath
-   Each event: { "type", "start", "end", "text" }
-6. has_speech_issues — true if speech_events is non-empty
+1. start / end
+   — use the word timestamps at the segment boundaries
 
-Return ONLY valid JSON. No markdown, no code blocks.
+2. speaker
+   — "Speaker A", "Speaker B", etc. Single voice = always "Speaker A"
+
+3. dialogue
+   — remove only speech disfluencies: fillers, stammers, false starts, retakes
+   — PRESERVE every sentence-ending punctuation mark (। . ! ?) exactly as spoken
+   — never replace । with , or any other character
+   — never merge two sentences by removing the punctuation between them
+
+4. raw_dialogue
+   — verbatim as transcribed, character-for-character
+   — includes all disfluencies and punctuation exactly as they appear
+
+5. speech_events
+   Use word timestamps to pinpoint each event precisely.
+   Event types:
+     "stammer"     : syllable or word repetition ("I-I", "th-the", "की की")
+     "false_start" : phrase begun but abandoned before completing
+     "retake"      : phrase repeated cleanly right after a mistake
+     "filler"      : filler words — English: "um", "uh", "like", "you know", "so"
+                                    Hindi:   "तो", "मतलब", "बस", "अरे", "हाँ", "ना"
+     "em_dash"     : hard mid-sentence abrupt stop (—)
+     "long_pause"  : silence > 0.8s between words (use word timestamps to detect)
+     "breath"      : audible breath sound
+   Each event: { "type", "start", "end", "text" }
+
+6. has_speech_issues
+   — true if speech_events is non-empty, false otherwise
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT — valid JSON only, no markdown
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {
   "speakers": ["Speaker A"],
@@ -71,41 +101,83 @@ start/end are already computed and MUST NOT be changed.
 */
 const SEGMENT_ANALYSIS_PROMPT = `You are a professional video transcript analyzer.
 
-You receive an array of transcript segments. Each segment already has:
-  - text  : the spoken words for that segment
-  - start : the segment start time in seconds (DO NOT change this)
-  - end   : the segment end time in seconds (DO NOT change this)
+You receive an array of transcript segments. Each segment has:
+  - text  : the spoken words (may contain multiple sentences)
+  - start : segment start time in seconds — DO NOT change
+  - end   : segment end time in seconds — DO NOT change
 
-Your only job is to analyze each segment and return the structured fields below.
-Do NOT re-segment, merge, or split the segments. Do NOT change start or end values.
+Your only job is to analyze the content of each segment.
+Do NOT re-segment, merge, or split. Do NOT change start or end.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SENTENCE BOUNDARIES IN THE TEXT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each text field may contain multiple sentences. Sentence-ending punctuation:
+  . ! ? । ॥ ؟ ！ 。 ？
+
+These marks show exactly where one sentence ends and the next begins.
+Use them as your primary guide for:
+  — understanding the structure of the spoken content
+  — estimating where within the segment each word or event occurs
+  — identifying pauses between sentences
+
+To estimate the time of any position in the text:
+  position_time = start + (chars_before_position / total_segment_chars) × (end − start)
+
+A sentence-ending mark means the speaker paused there. If the gap between two
+sentences looks long relative to the text around it, flag it as a "long_pause".
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FOR EACH SEGMENT, RETURN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. start         — copy exactly from input
-2. end           — copy exactly from input
-3. speaker       — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
-4. dialogue      — clean version of the text: remove fillers, stammers, false starts.
-                   Keep all meaningful content. Full sentences only.
-5. raw_dialogue  — the text field verbatim, exactly as given
-6. speech_events — list of events found within the segment:
-     "stammer"     : syllable or word repetition ("I-I think", "th-the")
-     "false_start" : phrase begun but abandoned mid-way
-     "retake"      : phrase repeated cleanly right after a mistake
-     "filler"      : filler words/sounds ("um", "uh", "er", "like", "you know")
-     "em_dash"     : hard abrupt mid-sentence stop (—)
-     "long_pause"  : noticeable silence gap within the segment
-     "breath"      : audible breath before or during speech
+1. start
+   — copy the exact value from input, unchanged
+
+2. end
+   — copy the exact value from input, unchanged
+
+3. speaker
+   — "Speaker A", "Speaker B", etc.
+   — Single voice = always "Speaker A"
+
+4. dialogue
+   — remove only true speech disfluencies: fillers, stammers, false starts, retakes
+   — KEEP every sentence-ending punctuation mark (। . ! ?) exactly as it appears
+   — NEVER replace । with , or any other character
+   — NEVER merge sentences by removing the punctuation between them
+   — NEVER add punctuation that isn't in the original text
+
+5. raw_dialogue
+   — must be character-for-character identical to the input text field
+   — copy it exactly, no changes whatsoever
+
+6. speech_events
+   Detect all of the following within this segment:
+     "stammer"     : syllable or word repetition ("I-I", "th-the", "की की", "पूरी की पूरी")
+     "false_start" : phrase begun but abandoned before completing the thought
+     "retake"      : phrase cleanly repeated right after a mistake
+     "filler"      : filler words/sounds:
+                     English — "um", "uh", "er", "like", "you know", "so", "basically"
+                     Hindi   — "तो", "मतलब", "बस", "अरे", "हाँ", "ना", "वो"
+     "em_dash"     : hard mid-sentence abrupt stop marked by — or a sudden cut
+     "long_pause"  : silence longer than 0.8s, typically at a sentence boundary (।)
+                     or between two distinct thoughts
+     "breath"      : audible breath sound before or during speech
+
+   For each event, estimate start and end using the character-position formula:
+     event_start = segment.start + (chars_before_event / total_chars) × duration
+     event_end   = segment.start + (chars_after_event  / total_chars) × duration
+
    Each event: { "type", "start", "end", "text" }
-   Estimate event timestamps proportionally within the segment's start–end window.
-7. has_speech_issues — true if speech_events is non-empty, otherwise false
+
+7. has_speech_issues
+   — true if speech_events is non-empty, false otherwise
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
+OUTPUT — valid JSON only, no markdown
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Return ONLY valid JSON. No markdown, no code blocks, no explanation.
 
 {
   "speakers": ["Speaker A"],
@@ -113,13 +185,12 @@ Return ONLY valid JSON. No markdown, no code blocks, no explanation.
   "segments": [
     {
       "start": 0.0,
-      "end": 34.5,
+      "end": 23.0,
       "speaker": "Speaker A",
-      "dialogue": "Let me show you how the settings panel works.",
-      "raw_dialogue": "Let me— let me show you um how the settings panel works.",
+      "dialogue": "2026 में कोडिंग सीखना सबसे बड़ी गलती हो सकती है। और मैं बताता हूँ क्यों।",
+      "raw_dialogue": "2026 में कोडिंग सीखना एक सबसे बड़ी गलती हो सकती है। और मैं बताता हूँ क्यों।",
       "speech_events": [
-        { "type": "false_start", "start": 0.8, "end": 1.0, "text": "Let me—" },
-        { "type": "filler", "start": 3.2, "end": 3.5, "text": "um" }
+        { "type": "filler", "start": 8.2, "end": 8.7, "text": "तो" }
       ],
       "has_speech_issues": true
     }

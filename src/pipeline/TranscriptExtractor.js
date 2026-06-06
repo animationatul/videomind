@@ -65,31 +65,40 @@ Return ONLY valid JSON. No markdown, no code blocks.
 If no speech is detected: { "speakers": [], "has_speech": false, "segments": [] }`;
 
 /*
-Used when there are no timestamps (json format).
-Segmentation is done in code — the LLM only fills in the analysis fields.
-start/end are already computed and MUST NOT be changed.
+Used when there are no timestamps (json format from gpt-4o-mini-transcribe).
+The LLM receives the raw transcript text and does both segmentation and analysis.
+It splits at every punctuation boundary and estimates timestamps proportionally.
 */
-const SEGMENT_ANALYSIS_PROMPT = `You are a professional video transcript analyzer.
+const FULL_ANALYSIS_PROMPT = `You are a professional video transcript analyzer.
 
-You receive an array of transcript segments. Each segment already has:
-  - text  : the spoken words for that segment
-  - start : the segment start time in seconds (DO NOT change this)
-  - end   : the segment end time in seconds (DO NOT change this)
-
-Your only job is to analyze each segment and return the structured fields below.
-Do NOT re-segment, merge, or split the segments. Do NOT change start or end values.
+You receive the full transcript text and the total audio duration in seconds.
+Your job is to split the speech into segments at every punctuation boundary and return structured data.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FOR EACH SEGMENT, RETURN
+SEGMENTATION RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. start         — copy exactly from input
-2. end           — copy exactly from input
+Split at EVERY punctuation mark: . , ! ? ; : — … । ॥ ؟ ！ 。 ？
+Each comma, full stop, em-dash, and pause indicator = one segment boundary.
+Do NOT group multiple clauses into one segment.
+Every phrase between punctuation marks must be its own segment.
+
+Estimate timestamps using character proportion:
+  segment_start = (characters before this segment / total characters) × total_duration
+  segment_end   = (characters through this segment / total characters) × total_duration
+Round all times to 3 decimal places.
+First segment must start at 0.000. Last segment must end at exactly [TOTAL_DURATION].
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FOR EACH SEGMENT RETURN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. start         — estimated start time in seconds
+2. end           — estimated end time in seconds
 3. speaker       — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
-4. dialogue      — clean version of the text: remove fillers, stammers, false starts.
-                   Keep all meaningful content. Full sentences only.
-5. raw_dialogue  — the text field verbatim, exactly as given
-6. speech_events — list of events found within the segment:
+4. dialogue      — clean text: remove fillers, stammers, false starts
+5. raw_dialogue  — verbatim as it appears in the input transcript
+6. speech_events — events within this segment:
      "stammer"     : syllable or word repetition ("I-I think", "th-the")
      "false_start" : phrase begun but abandoned mid-way
      "retake"      : phrase repeated cleanly right after a mistake
@@ -112,14 +121,13 @@ Return ONLY valid JSON. No markdown, no code blocks, no explanation.
   "has_speech": true,
   "segments": [
     {
-      "start": 0.0,
-      "end": 34.5,
+      "start": 0.000,
+      "end": 3.200,
       "speaker": "Speaker A",
-      "dialogue": "Let me show you how the settings panel works.",
-      "raw_dialogue": "Let me— let me show you um how the settings panel works.",
+      "dialogue": "Let me show you how this works.",
+      "raw_dialogue": "Let me, um, show you how this works.",
       "speech_events": [
-        { "type": "false_start", "start": 0.8, "end": 1.0, "text": "Let me—" },
-        { "type": "filler", "start": 3.2, "end": 3.5, "text": "um" }
+        { "type": "filler", "start": 1.1, "end": 1.4, "text": "um" }
       ],
       "has_speech_issues": true
     }
@@ -128,9 +136,6 @@ Return ONLY valid JSON. No markdown, no code blocks, no explanation.
 
 If no speech is detected: { "speakers": [], "has_speech": false, "segments": [] }`;
 
-// Sentence-ending punctuation across all common languages/scripts
-const SENTENCE_END = /[.!?।॥؟！。？]+/u;
-const SENTENCE_SPLIT = /(?<=[.!?।॥؟！。？]+)\s*/u;
 
 export class TranscriptExtractor {
 
@@ -247,72 +252,6 @@ export class TranscriptExtractor {
 
     }
 
-    /*
-    Splits plain text into segments at sentence-boundary punctuation.
-    Groups sentences until the proportional character-count reaches
-    the minSeconds target, then closes the segment.
-    Returns: [{ text, start, end }, ...]
-    */
-    segmentByPunctuation(text, totalDuration, minSeconds = 20) {
-
-        // Split on sentence-ending punctuation, keeping the delimiter
-        const sentences = text
-            .split(SENTENCE_SPLIT)
-            .map(s => s.trim())
-            .filter(s => s.length > 0);
-
-        const totalChars = text.length;
-        const segments = [];
-        let current = [];
-        let currentChars = 0;
-        let runningTime = 0;
-
-        const flush = (isLast) => {
-
-            if (current.length === 0) return;
-
-            const segText = current.join(" ").trim();
-            const segDuration =
-                (segText.length / totalChars) * totalDuration;
-
-            const start = Number(runningTime.toFixed(3));
-
-            const end = isLast
-                ? Number(totalDuration.toFixed(3))
-                : Number((runningTime + segDuration).toFixed(3));
-
-            segments.push({ text: segText, start, end });
-
-            runningTime = end;
-            current = [];
-            currentChars = 0;
-
-        };
-
-        for (let i = 0; i < sentences.length; i++) {
-
-            const s = sentences[i];
-            current.push(s);
-            currentChars += s.length;
-
-            const accumulated =
-                (currentChars / totalChars) * totalDuration;
-
-            const isLast = i === sentences.length - 1;
-            const endsAtBoundary = SENTENCE_END.test(s);
-
-            if (isLast) {
-                flush(true);
-            } else if (accumulated >= minSeconds && endsAtBoundary) {
-                flush(false);
-            }
-
-        }
-
-        return segments;
-
-    }
-
     async analyzeTranscript(rawTranscript, duration) {
 
         const hasTimestamps =
@@ -338,19 +277,19 @@ export class TranscriptExtractor {
 
         }
 
-        // No timestamps — split by punctuation in code, then LLM
-        // only analyses content (start/end are already determined)
-        const segments =
-            this.segmentByPunctuation(
-                rawTranscript.text,
-                duration
+        // No timestamps — send raw text directly; LLM handles both
+        // segmentation (at every punctuation boundary) and analysis
+        const systemPrompt =
+            FULL_ANALYSIS_PROMPT.replace(
+                "[TOTAL_DURATION]",
+                duration.toFixed(3)
             );
 
         const userContent =
             `Total audio duration: ${duration.toFixed(3)} seconds\n\n` +
-            JSON.stringify(segments, null, 2);
+            `Transcript:\n${rawTranscript.text}`;
 
-        return this.callLlm(SEGMENT_ANALYSIS_PROMPT, userContent);
+        return this.callLlm(systemPrompt, userContent);
 
     }
 

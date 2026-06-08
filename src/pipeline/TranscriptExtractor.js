@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import fs from "fs";
+import { spawn } from "child_process";
 
 dotenv.config();
 
@@ -187,6 +188,40 @@ export class TranscriptExtractor {
             // SRT not supported by this model — fall through to verbose_json
         }
 
+        // ── Step 1.5: verify SRT timestamps against actual audio file duration ──
+        // gpt-4o-transcribe can return compressed timestamps on certain video types
+        // (e.g. phone screen recordings). We measure the real audio duration with
+        // ffprobe and scale linearly if the model's last timestamp is < 90% of it.
+        if (srtSegments?.length > 0) {
+
+            const audioDuration = await this.getAudioDuration(audioPath);
+
+            if (audioDuration) {
+
+                const lastTs = srtSegments[srtSegments.length - 1].end;
+                const ratio  = lastTs / audioDuration;
+
+                if (ratio < 0.9) {
+
+                    const scale = audioDuration / lastTs;
+
+                    console.log(
+                        `SRT timestamps compressed (${ratio.toFixed(2)}x). ` +
+                        `Scaling by ${scale.toFixed(3)}x to match audio duration.`
+                    );
+
+                    srtSegments = srtSegments.map(s => ({
+                        start: Number((s.start * scale).toFixed(3)),
+                        end:   Number((s.end   * scale).toFixed(3)),
+                        text:  s.text
+                    }));
+
+                }
+
+            }
+
+        }
+
         // ── Step 2: verbose_json fallback (for language + timestamp fallback) ──
         let rawTranscript = null;
 
@@ -299,6 +334,34 @@ export class TranscriptExtractor {
             has_speech: structured.has_speech,
             segments:   structured.segments
         };
+
+    }
+
+    // ── Audio duration via ffprobe ─────────────────────────────────────────────
+
+    getAudioDuration(audioPath) {
+
+        return new Promise(resolve => {
+
+            const ffprobe = spawn("ffprobe", [
+                "-v",     "error",
+                "-show_entries", "format=duration",
+                "-of",    "default=noprint_wrappers=1:nokey=1",
+                audioPath
+            ]);
+
+            let out = "";
+
+            ffprobe.stdout.on("data", d => out += d.toString());
+
+            ffprobe.on("close", () => {
+                const d = parseFloat(out);
+                resolve(isNaN(d) ? null : Number(d.toFixed(3)));
+            });
+
+            ffprobe.on("error", () => resolve(null));
+
+        });
 
     }
 

@@ -164,81 +164,81 @@ export class TranscriptExtractor {
 
         console.log("Transcribing audio...");
 
-        // ── Step 1: verbose_json + word timestamps (most accurate) ────────────
-        // whisper-1 word-level timestamps are the highest precision available.
-        // segmentByWords() builds sentence segments from them in code so the
-        // LLM never touches the numbers.
-        let rawTranscript = null;
-        let language      = null;
+        // ── Step 1: SRT call — timestamps come from the model, parsed in code ──
+        let srtSegments = null;
+        let language    = null;
 
         try {
 
-            rawTranscript =
+            const srtContent =
                 await this.client.audio.transcriptions.create({
                     file:
                         fs.createReadStream(audioPath),
                     model:
                         this.audioModel,
                     response_format:
-                        "verbose_json",
-                    timestamp_granularities:
-                        ["word", "segment"]
+                        "srt"
                 });
 
-            language = rawTranscript?.language ?? null;
+            srtSegments = this.parseSrt(srtContent);
 
         }
-        catch { /* fall through to SRT */ }
+        catch {
+            // SRT not supported by this model — fall through to verbose_json
+        }
 
-        // ── Step 2: SRT fallback (for models without word granularities) ──────
-        let srtSegments = null;
+        // ── Step 2: verbose_json fallback (for language + timestamp fallback) ──
+        let rawTranscript = null;
 
-        const hasWords =
-            rawTranscript?.words?.length > 0;
+        if (!srtSegments?.length) {
 
-        if (!hasWords) {
+            try {
 
-            if (rawTranscript?.segments?.length > 0) {
-                // verbose_json succeeded but returned no words — use model segments
-            } else {
+                rawTranscript =
+                    await this.client.audio.transcriptions.create({
+                        file:
+                            fs.createReadStream(audioPath),
+                        model:
+                            this.audioModel,
+                        response_format:
+                            "verbose_json",
+                        timestamp_granularities:
+                            ["word", "segment"]
+                    });
+
+            }
+            catch {
 
                 try {
 
-                    const srtContent =
+                    rawTranscript =
                         await this.client.audio.transcriptions.create({
                             file:
                                 fs.createReadStream(audioPath),
                             model:
                                 this.audioModel,
                             response_format:
-                                "srt"
+                                "verbose_json"
                         });
-
-                    srtSegments = this.parseSrt(srtContent);
 
                 }
                 catch {
 
-                    // Last resort: json text only
-                    if (!rawTranscript) {
-
-                        rawTranscript =
-                            await this.client.audio.transcriptions.create({
-                                file:
-                                    fs.createReadStream(audioPath),
-                                model:
-                                    this.audioModel,
-                                response_format:
-                                    "json"
-                            });
-
-                        language = rawTranscript?.language ?? null;
-
-                    }
+                    rawTranscript =
+                        await this.client.audio.transcriptions.create({
+                            file:
+                                fs.createReadStream(audioPath),
+                            model:
+                                this.audioModel,
+                            response_format:
+                                "json"
+                        });
 
                 }
 
             }
+
+            language = rawTranscript?.language ?? null;
 
         }
 
@@ -254,12 +254,12 @@ export class TranscriptExtractor {
         if (!hasContent) {
 
             return {
-                audio:      audioPath,
-                language:   null,
-                duration:   resolvedDuration,
-                speakers:   [],
+                audio:     audioPath,
+                language:  null,
+                duration:  resolvedDuration,
+                speakers:  [],
                 has_speech: false,
-                segments:   []
+                segments:  []
             };
 
         }

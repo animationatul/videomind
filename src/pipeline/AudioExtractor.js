@@ -23,8 +23,8 @@ export class AudioExtractor {
                         "-ac",
                         "1",
 
-                        "-ar",
-                        "16000",
+                        "-b:a",
+                        "64k",
 
                         this.output
                     ]

@@ -45,7 +45,7 @@ export class TempManager {
             audioPath:
                 path.join(
                     jobPath,
-                    "audio.wav"
+                    "audio.m4a"
                 ),
 
             collagePath:

@@ -5,10 +5,7 @@ import fs from "fs";
 dotenv.config();
 
 /*
-Used when word-level timestamps are available (Path 1 — most accurate).
-Segments are built in code from word timestamps; the LLM only enriches them.
-Timestamps are always pinned back from the code-built segments after the LLM call,
-so the LLM can never drift them.
+Primary path — SRT parsed in code, LLM only enriches (no timestamps).
 */
 const ENRICHMENT_PROMPT = `You are a professional video transcript analyzer.
 
@@ -64,70 +61,31 @@ Return ONLY valid JSON. No markdown, no code blocks, no explanation.
 If no speech is detected: { "speakers": [], "has_speech": false, "segments": [] }`;
 
 /*
-Used when only model-level segments are available (Path 2 — no word timestamps).
-The LLM enriches each segment; timestamps are pinned from rawTranscript.segments after the call.
+Fallback — used when the model returns verbose_json without word timestamps.
+LLM receives model segments and enriches them; timestamps are pinned afterward.
 */
 const ANALYSIS_SYSTEM_PROMPT = `You are a professional video transcript analyzer.
 
-You receive a verbose transcript from an audio transcription model.
-It includes an array of segments, each with precise start/end timestamps and transcribed text.
-
-Your job is to analyze each segment and return the structured fields below.
-Do NOT merge, split, or re-segment. Each input segment becomes exactly one output segment.
-Copy start and end timestamps exactly as given — do not modify them.
+You receive a verbose transcript with segments that have precise start/end timestamps.
+Enrich each segment. Do NOT merge, split, or re-segment. Do NOT change timestamps.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FOR EACH SEGMENT RETURN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. start         — copy exactly from input (do not change)
-2. end           — copy exactly from input (do not change)
-3. speaker       — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
-4. dialogue      — clean text: remove fillers, stammers, false starts. Keep all meaning.
-5. raw_dialogue  — verbatim as transcribed in the input segment
-6. speech_events — events within this segment:
-     "stammer"     : syllable or word repetition ("I-I think", "th-the")
-     "false_start" : phrase begun but abandoned mid-way
-     "retake"      : phrase repeated cleanly right after a mistake
-     "filler"      : filler words/sounds ("um", "uh", "er", "like", "you know")
-     "em_dash"     : hard abrupt mid-sentence stop (—)
-     "long_pause"  : silence gap > 0.8s within the segment
-     "breath"      : audible breath before or during speech
-   Each event: { "type", "start", "end", "text" }
-   Estimate event timestamps proportionally within the segment's start–end window.
-7. has_speech_issues — true if speech_events is non-empty, otherwise false
+1. start / end   — copy exactly from input
+2. speaker       — "Speaker A", "Speaker B", etc.
+3. dialogue      — clean text: remove fillers, stammers, false starts
+4. raw_dialogue  — verbatim as transcribed
+5. speech_events — { "type", "start", "end", "text" } for each event:
+     stammer / false_start / retake / filler / em_dash / long_pause / breath
+6. has_speech_issues — true if speech_events is non-empty
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Return ONLY valid JSON. No markdown, no code blocks, no explanation.
-
-{
-  "speakers": ["Speaker A"],
-  "has_speech": true,
-  "segments": [
-    {
-      "start": 0.0,
-      "end": 4.2,
-      "speaker": "Speaker A",
-      "dialogue": "Let me show you how the settings panel works.",
-      "raw_dialogue": "Let me— let me show you um how the settings panel works.",
-      "speech_events": [
-        { "type": "false_start", "start": 0.8, "end": 1.0, "text": "Let me—" },
-        { "type": "filler", "start": 3.2, "end": 3.5, "text": "um" }
-      ],
-      "has_speech_issues": true
-    }
-  ]
-}
-
-If no speech is detected: { "speakers": [], "has_speech": false, "segments": [] }`;
+Return ONLY valid JSON — same structure as ENRICHMENT_PROMPT above.
+If no speech: { "speakers": [], "has_speech": false, "segments": [] }`;
 
 /*
-Used when there are no timestamps (json format from gpt-4o-mini-transcribe).
-The LLM receives the raw transcript text and does both segmentation and analysis.
-It splits at every punctuation boundary and estimates timestamps proportionally.
+Last-resort fallback — no timestamps available, LLM estimates from character proportion.
 */
 const FULL_ANALYSIS_PROMPT = `You are a professional video transcript analyzer.
 
@@ -153,28 +111,14 @@ First segment must start at 0.000. Last segment must end at exactly [TOTAL_DURAT
 FOR EACH SEGMENT RETURN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. start         — estimated start time in seconds
-2. end           — estimated end time in seconds
-3. speaker       — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
-4. dialogue      — clean text: remove fillers, stammers, false starts
-5. raw_dialogue  — verbatim as it appears in the input transcript
-6. speech_events — events within this segment:
-     "stammer"     : syllable or word repetition ("I-I think", "th-the")
-     "false_start" : phrase begun but abandoned mid-way
-     "retake"      : phrase repeated cleanly right after a mistake
-     "filler"      : filler words/sounds ("um", "uh", "er", "like", "you know")
-     "em_dash"     : hard abrupt mid-sentence stop (—)
-     "long_pause"  : noticeable silence gap within the segment
-     "breath"      : audible breath before or during speech
-   Each event: { "type", "start", "end", "text" }
-   Estimate event timestamps proportionally within the segment's start–end window.
-7. has_speech_issues — true if speech_events is non-empty, otherwise false
+1. start / end       — estimated seconds
+2. speaker           — "Speaker A", "Speaker B", etc.
+3. dialogue          — clean text
+4. raw_dialogue      — verbatim
+5. speech_events     — { "type", "start", "end", "text" }
+6. has_speech_issues — true if speech_events non-empty
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Return ONLY valid JSON. No markdown, no code blocks, no explanation.
+Return ONLY valid JSON. No markdown, no code blocks.
 
 {
   "speakers": ["Speaker A"],
@@ -194,7 +138,7 @@ Return ONLY valid JSON. No markdown, no code blocks, no explanation.
   ]
 }
 
-If no speech is detected: { "speakers": [], "has_speech": false, "segments": [] }`;
+If no speech: { "speakers": [], "has_speech": false, "segments": [] }`;
 
 
 export class TranscriptExtractor {
@@ -220,24 +164,33 @@ export class TranscriptExtractor {
 
         console.log("Transcribing audio...");
 
-        let rawTranscript;
+        // ── Step 1: SRT call — timestamps come from the model, parsed in code ──
+        let srtSegments = null;
+        let language    = null;
 
         try {
 
-            rawTranscript =
+            const srtContent =
                 await this.client.audio.transcriptions.create({
                     file:
                         fs.createReadStream(audioPath),
                     model:
                         this.audioModel,
                     response_format:
-                        "verbose_json",
-                    timestamp_granularities:
-                        ["word", "segment"]
+                        "srt"
                 });
+
+            srtSegments = this.parseSrt(srtContent);
 
         }
         catch {
+            // SRT not supported by this model — fall through to verbose_json
+        }
+
+        // ── Step 2: verbose_json fallback (for language + timestamp fallback) ──
+        let rawTranscript = null;
+
+        if (!srtSegments?.length) {
 
             try {
 
@@ -248,59 +201,80 @@ export class TranscriptExtractor {
                         model:
                             this.audioModel,
                         response_format:
-                            "verbose_json"
+                            "verbose_json",
+                        timestamp_granularities:
+                            ["word", "segment"]
                     });
 
             }
             catch {
 
-                rawTranscript =
-                    await this.client.audio.transcriptions.create({
-                        file:
-                            fs.createReadStream(audioPath),
-                        model:
-                            this.audioModel,
-                        response_format:
-                            "json"
-                    });
+                try {
+
+                    rawTranscript =
+                        await this.client.audio.transcriptions.create({
+                            file:
+                                fs.createReadStream(audioPath),
+                            model:
+                                this.audioModel,
+                            response_format:
+                                "verbose_json"
+                        });
+
+                }
+                catch {
+
+                    rawTranscript =
+                        await this.client.audio.transcriptions.create({
+                            file:
+                                fs.createReadStream(audioPath),
+                            model:
+                                this.audioModel,
+                            response_format:
+                                "json"
+                        });
+
+                }
 
             }
 
+            language = rawTranscript?.language ?? null;
+
         }
 
+        // ── Step 3: empty audio guard ──────────────────────────────────────────
         const resolvedDuration =
-            rawTranscript.duration ?? duration;
+            rawTranscript?.duration ?? duration;
 
-        if (
-            !rawTranscript.text ||
-            rawTranscript.text.trim() === ""
-        ) {
+        const hasContent =
+            srtSegments?.length > 0 ||
+            (rawTranscript?.text?.trim() !== "" &&
+             rawTranscript?.text != null);
+
+        if (!hasContent) {
 
             return {
-                audio: audioPath,
-                language: null,
-                duration: resolvedDuration,
-                speakers: [],
+                audio:     audioPath,
+                language:  null,
+                duration:  resolvedDuration,
+                speakers:  [],
                 has_speech: false,
-                segments: []
+                segments:  []
             };
 
         }
 
-        console.log(
-            "Analyzing segments and speech events..."
-        );
+        console.log("Analyzing segments and speech events...");
 
+        // ── Step 4: LLM enrichment ─────────────────────────────────────────────
         const structured =
             await this.analyzeTranscript(
+                srtSegments,
                 rawTranscript,
                 resolvedDuration
             );
 
-        // Shift all timestamps forward by the container's audio stream start_time.
-        // FFmpeg normalises the extracted WAV to 0 regardless of the source
-        // stream's PTS offset, so without this correction every timestamp
-        // is earlier than what a video player displays.
+        // ── Step 5: container start_time offset ───────────────────────────────
         if (startTimeOffset > 0 && structured.segments?.length > 0) {
 
             structured.segments =
@@ -318,22 +292,161 @@ export class TranscriptExtractor {
         }
 
         return {
-            audio: audioPath,
-            language:
-                rawTranscript.language ?? null,
-            duration: resolvedDuration,
-            speakers:
-                structured.speakers,
-            has_speech:
-                structured.has_speech,
-            segments:
-                structured.segments
+            audio:      audioPath,
+            language,
+            duration:   resolvedDuration,
+            speakers:   structured.speakers,
+            has_speech: structured.has_speech,
+            segments:   structured.segments
         };
 
     }
 
-    // Splits word-level timestamp data into sentence segments at punctuation
-    // boundaries. Returns null if words array is empty or unusable.
+    // ── SRT parsing ────────────────────────────────────────────────────────────
+
+    parseSrt(srtText) {
+
+        if (!srtText) return [];
+
+        const blocks =
+            String(srtText).trim().split(/\n\n+/);
+
+        const segments = [];
+
+        for (const block of blocks) {
+
+            const lines =
+                block.trim().split("\n");
+
+            if (lines.length < 2) continue;
+
+            const timeLineIdx =
+                lines.findIndex(l => l.includes("-->"));
+
+            if (timeLineIdx === -1) continue;
+
+            const [startStr, endStr] =
+                lines[timeLineIdx]
+                    .split("-->")
+                    .map(s => s.trim());
+
+            const text =
+                lines.slice(timeLineIdx + 1)
+                    .join(" ")
+                    .trim();
+
+            if (!text) continue;
+
+            const start = this.srtTimeToSeconds(startStr);
+            const end   = this.srtTimeToSeconds(endStr);
+
+            if (isNaN(start) || isNaN(end)) continue;
+
+            segments.push({ start, end, text });
+
+        }
+
+        return segments;
+
+    }
+
+    srtTimeToSeconds(str) {
+
+        // "00:00:01,480" or "00:00:01.480"
+        const normalized = str.trim().replace(",", ".");
+        const dotIdx     = normalized.lastIndexOf(".");
+        const hms        = dotIdx >= 0 ? normalized.slice(0, dotIdx) : normalized;
+        const msStr      = dotIdx >= 0 ? normalized.slice(dotIdx + 1) : "000";
+
+        const parts = hms.split(":").map(Number);
+        let seconds = 0;
+        for (const p of parts) seconds = seconds * 60 + p;
+
+        return Number(
+            (seconds + Number(msStr.padEnd(3, "0").slice(0, 3)) / 1000).toFixed(3)
+        );
+
+    }
+
+    // ── Analysis routing ───────────────────────────────────────────────────────
+
+    async analyzeTranscript(srtSegments, rawTranscript, duration) {
+
+        // Path 1: SRT segments — timestamps come from deterministic parser
+        if (srtSegments?.length > 0) {
+            return this.enrichSegments(srtSegments, duration);
+        }
+
+        // Path 2: word-level timestamps from verbose_json
+        const wordSegments =
+            this.segmentByWords(rawTranscript?.words, duration);
+
+        if (wordSegments) {
+            return this.enrichSegments(wordSegments, duration);
+        }
+
+        // Path 3: model-level segments from verbose_json
+        const modelSegments = rawTranscript?.segments ?? [];
+
+        if (modelSegments.length > 0) {
+
+            const userContent =
+                `Total audio duration: ${duration?.toFixed(3)} seconds\n\n` +
+                JSON.stringify(rawTranscript, null, 2);
+
+            const result =
+                await this.callLlm(ANALYSIS_SYSTEM_PROMPT, userContent);
+
+            // Pin timestamps so LLM cannot drift them
+            if (result.segments?.length === modelSegments.length) {
+                result.segments = result.segments.map((seg, i) => ({
+                    ...seg,
+                    start: modelSegments[i].start,
+                    end:   modelSegments[i].end
+                }));
+            }
+
+            return result;
+
+        }
+
+        // Path 4: text only — LLM estimates from character proportion
+        const systemPrompt =
+            FULL_ANALYSIS_PROMPT.replace("[TOTAL_DURATION]", duration.toFixed(3));
+
+        const userContent =
+            `Total audio duration: ${duration.toFixed(3)} seconds\n\n` +
+            `Transcript:\n${rawTranscript.text}`;
+
+        return this.callLlm(systemPrompt, userContent);
+
+    }
+
+    // Enrich pre-segmented timestamps with LLM, then pin timestamps back.
+    async enrichSegments(segments, duration) {
+
+        const userContent = JSON.stringify({
+            total_duration: duration,
+            segments
+        }, null, 2);
+
+        const result =
+            await this.callLlm(ENRICHMENT_PROMPT, userContent);
+
+        // Always pin timestamps from source — LLM output is discarded for start/end
+        if (result.segments?.length === segments.length) {
+            result.segments = result.segments.map((seg, i) => ({
+                ...seg,
+                start: segments[i].start,
+                end:   segments[i].end
+            }));
+        }
+
+        return result;
+
+    }
+
+    // Splits word-level timestamp data into sentence segments at punctuation.
     segmentByWords(words, duration) {
 
         if (!words?.length) return null;
@@ -371,87 +484,6 @@ export class TranscriptExtractor {
         }
 
         return segments.length > 0 ? segments : null;
-
-    }
-
-    async analyzeTranscript(rawTranscript, duration) {
-
-        // ── Path 1: word-level timestamps (most accurate) ─────────────────
-        // Build segments in code so timestamps are never touched by the LLM.
-        const wordSegments =
-            this.segmentByWords(rawTranscript.words, duration);
-
-        if (wordSegments) {
-
-            const userContent = JSON.stringify({
-                total_duration: duration,
-                segments: wordSegments
-            }, null, 2);
-
-            const result =
-                await this.callLlm(ENRICHMENT_PROMPT, userContent);
-
-            // Pin timestamps from code-built segments — the LLM must not drift them
-            if (result.segments?.length === wordSegments.length) {
-
-                result.segments = result.segments.map((seg, i) => ({
-                    ...seg,
-                    start: wordSegments[i].start,
-                    end:   wordSegments[i].end
-                }));
-
-            }
-
-            return result;
-
-        }
-
-        // ── Path 2: model-level segments only (no word timestamps) ────────
-        const modelSegments = rawTranscript.segments ?? [];
-
-        if (modelSegments.length > 0) {
-
-            const systemPrompt = duration
-                ? ANALYSIS_SYSTEM_PROMPT.replaceAll(
-                    "[TOTAL_DURATION]",
-                    duration.toFixed(3)
-                )
-                : ANALYSIS_SYSTEM_PROMPT;
-
-            const userContent = duration
-                ? `Total audio duration: ${duration.toFixed(3)} seconds\n\n${JSON.stringify(rawTranscript, null, 2)}`
-                : JSON.stringify(rawTranscript, null, 2);
-
-            const result =
-                await this.callLlm(systemPrompt, userContent);
-
-            // Pin timestamps from model segments
-            if (result.segments?.length === modelSegments.length) {
-
-                result.segments = result.segments.map((seg, i) => ({
-                    ...seg,
-                    start: modelSegments[i].start,
-                    end:   modelSegments[i].end
-                }));
-
-            }
-
-            return result;
-
-        }
-
-        // ── Path 3: no timestamps at all — LLM estimates from text ────────
-        const systemPrompt =
-            FULL_ANALYSIS_PROMPT.replace(
-                "[TOTAL_DURATION]",
-                duration.toFixed(3)
-            );
-
-        const userContent =
-            `Total audio duration: ${duration.toFixed(3)} seconds\n\n` +
-            `Transcript:\n${rawTranscript.text}`;
-
-        return this.callLlm(systemPrompt, userContent);
 
     }
 

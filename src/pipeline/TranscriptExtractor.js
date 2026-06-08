@@ -262,8 +262,6 @@ export class TranscriptExtractor {
 
         if (hasTimestamps) {
 
-            // Real timestamps available — let the LLM do both segmentation
-            // and analysis using precise timing
             const systemPrompt = duration
                 ? ANALYSIS_SYSTEM_PROMPT.replaceAll(
                     "[TOTAL_DURATION]",
@@ -275,7 +273,20 @@ export class TranscriptExtractor {
                 ? `Total audio duration: ${duration.toFixed(3)} seconds\n\n${JSON.stringify(rawTranscript, null, 2)}`
                 : JSON.stringify(rawTranscript, null, 2);
 
-            return this.callLlm(systemPrompt, userContent);
+            const result = await this.callLlm(systemPrompt, userContent);
+
+            // LLMs are unreliable with numbers — pin start/end directly
+            // from the source segments so timestamps are always exact
+            const source = rawTranscript.segments ?? [];
+            if (source.length > 0 && result.segments?.length === source.length) {
+                result.segments = result.segments.map((seg, i) => ({
+                    ...seg,
+                    start: source[i].start,
+                    end:   source[i].end
+                }));
+            }
+
+            return result;
 
         }
 

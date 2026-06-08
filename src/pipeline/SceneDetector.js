@@ -286,7 +286,7 @@ export class SceneDetector {
                             "-v",
                             "error",
                             "-show_entries",
-                            "stream=width,height,r_frame_rate,codec_type:format=duration",
+                            "stream=width,height,r_frame_rate,codec_type,start_time:format=start_time,duration",
                             "-of",
                             "json",
                             videoPath
@@ -339,6 +339,18 @@ export class SceneDetector {
 
                             }
 
+                            const rawAudioStart =
+                                audioStream?.start_time ??
+                                info.format?.start_time ??
+                                "0";
+
+                            const audioStartTime =
+                                rawAudioStart === "N/A"
+                                    ? 0
+                                    : Number(
+                                        parseFloat(rawAudioStart).toFixed(3)
+                                    );
+
                             resolve({
                                 duration: Number(
                                     parseFloat(
@@ -353,7 +365,10 @@ export class SceneDetector {
                                 fps,
 
                                 has_audio:
-                                    !!audioStream
+                                    !!audioStream,
+
+                                audio_start_time:
+                                    audioStartTime
                             });
 
                         }

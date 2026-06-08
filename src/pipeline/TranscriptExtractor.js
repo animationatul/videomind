@@ -158,7 +158,7 @@ export class TranscriptExtractor {
 
     }
 
-    async extract(audioPath, duration = null) {
+    async extract(audioPath, duration = null, startTimeOffset = 0) {
 
         console.log("Transcribing audio...");
 
@@ -238,6 +238,26 @@ export class TranscriptExtractor {
                 rawTranscript,
                 resolvedDuration
             );
+
+        // Shift all timestamps forward by the container's audio stream start_time.
+        // FFmpeg normalises the extracted WAV to 0 regardless of the source
+        // stream's PTS offset, so without this correction every timestamp
+        // is earlier than what a video player displays.
+        if (startTimeOffset > 0 && structured.segments?.length > 0) {
+
+            structured.segments =
+                structured.segments.map(seg => ({
+                    ...seg,
+                    start: Number((seg.start + startTimeOffset).toFixed(3)),
+                    end:   Number((seg.end   + startTimeOffset).toFixed(3)),
+                    speech_events: seg.speech_events?.map(ev => ({
+                        ...ev,
+                        start: Number((ev.start + startTimeOffset).toFixed(3)),
+                        end:   Number((ev.end   + startTimeOffset).toFixed(3))
+                    })) ?? []
+                }));
+
+        }
 
         return {
             audio: audioPath,

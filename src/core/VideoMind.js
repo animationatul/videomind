@@ -98,7 +98,7 @@ export class VideoMind {
             scenes
         ] = await Promise.all([
             new TranscriptExtractor()
-                .extract(audio.audio, metadata.duration),
+                .extract(audio.audio, metadata.duration, metadata.audio_start_time),
 
             new SceneDetector()
                 .detect(videoPath)

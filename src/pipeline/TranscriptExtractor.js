@@ -5,9 +5,67 @@ import fs from "fs";
 dotenv.config();
 
 /*
-Used when the transcript has real word/segment timestamps (verbose_json from gpt-4o-transcribe).
-The model's segment boundaries are the ground truth — do NOT merge or re-segment.
-The LLM only fills in speaker, dialogue, and speech event analysis.
+Used when word-level timestamps are available (Path 1 — most accurate).
+Segments are built in code from word timestamps; the LLM only enriches them.
+Timestamps are always pinned back from the code-built segments after the LLM call,
+so the LLM can never drift them.
+*/
+const ENRICHMENT_PROMPT = `You are a professional video transcript analyzer.
+
+You receive an array of speech segments that already have accurate start/end timestamps and text.
+Your job is to enrich each segment. Do NOT change start/end timestamps. Do NOT merge or split segments.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FOR EACH SEGMENT ADD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. start         — copy exactly from input (do not change)
+2. end           — copy exactly from input (do not change)
+3. speaker       — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
+4. dialogue      — clean text: remove fillers, stammers, false starts. Keep all meaning.
+5. raw_dialogue  — verbatim copy of the input text field
+6. speech_events — events within this segment:
+     "stammer"     : syllable or word repetition ("I-I think", "th-the")
+     "false_start" : phrase begun but abandoned mid-way
+     "retake"      : phrase repeated cleanly right after a mistake
+     "filler"      : filler words/sounds ("um", "uh", "er", "like", "you know")
+     "em_dash"     : hard abrupt mid-sentence stop (—)
+     "long_pause"  : silence gap > 0.8s within the segment
+     "breath"      : audible breath before or during speech
+   Each event: { "type", "start", "end", "text" }
+   Estimate event timestamps proportionally within the segment's start–end window.
+7. has_speech_issues — true if speech_events is non-empty, otherwise false
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY valid JSON. No markdown, no code blocks, no explanation.
+
+{
+  "speakers": ["Speaker A"],
+  "has_speech": true,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 4.2,
+      "speaker": "Speaker A",
+      "dialogue": "Let me show you how the settings panel works.",
+      "raw_dialogue": "Let me— let me show you um how the settings panel works.",
+      "speech_events": [
+        { "type": "false_start", "start": 0.8, "end": 1.0, "text": "Let me—" },
+        { "type": "filler", "start": 3.2, "end": 3.5, "text": "um" }
+      ],
+      "has_speech_issues": true
+    }
+  ]
+}
+
+If no speech is detected: { "speakers": [], "has_speech": false, "segments": [] }`;
+
+/*
+Used when only model-level segments are available (Path 2 — no word timestamps).
+The LLM enriches each segment; timestamps are pinned from rawTranscript.segments after the call.
 */
 const ANALYSIS_SYSTEM_PROMPT = `You are a professional video transcript analyzer.
 
@@ -274,13 +332,84 @@ export class TranscriptExtractor {
 
     }
 
+    // Splits word-level timestamp data into sentence segments at punctuation
+    // boundaries. Returns null if words array is empty or unusable.
+    segmentByWords(words, duration) {
+
+        if (!words?.length) return null;
+
+        const SENTENCE_END = /[.!?।॥؟！。？]/;
+        const segments = [];
+        let current = [];
+
+        for (const w of words) {
+
+            current.push(w);
+
+            if (SENTENCE_END.test(w.word)) {
+
+                segments.push({
+                    start: current[0].start,
+                    end:   current[current.length - 1].end,
+                    text:  current.map(x => x.word).join("").trim()
+                });
+
+                current = [];
+
+            }
+
+        }
+
+        if (current.length > 0) {
+
+            segments.push({
+                start: current[0].start,
+                end:   duration ?? current[current.length - 1].end,
+                text:  current.map(x => x.word).join("").trim()
+            });
+
+        }
+
+        return segments.length > 0 ? segments : null;
+
+    }
+
     async analyzeTranscript(rawTranscript, duration) {
 
-        const hasTimestamps =
-            (rawTranscript.segments?.length > 0) ||
-            (rawTranscript.words?.length > 0);
+        // ── Path 1: word-level timestamps (most accurate) ─────────────────
+        // Build segments in code so timestamps are never touched by the LLM.
+        const wordSegments =
+            this.segmentByWords(rawTranscript.words, duration);
 
-        if (hasTimestamps) {
+        if (wordSegments) {
+
+            const userContent = JSON.stringify({
+                total_duration: duration,
+                segments: wordSegments
+            }, null, 2);
+
+            const result =
+                await this.callLlm(ENRICHMENT_PROMPT, userContent);
+
+            // Pin timestamps from code-built segments — the LLM must not drift them
+            if (result.segments?.length === wordSegments.length) {
+
+                result.segments = result.segments.map((seg, i) => ({
+                    ...seg,
+                    start: wordSegments[i].start,
+                    end:   wordSegments[i].end
+                }));
+
+            }
+
+            return result;
+
+        }
+
+        // ── Path 2: model-level segments only (no word timestamps) ────────
+        const modelSegments = rawTranscript.segments ?? [];
+
+        if (modelSegments.length > 0) {
 
             const systemPrompt = duration
                 ? ANALYSIS_SYSTEM_PROMPT.replaceAll(
@@ -293,25 +422,25 @@ export class TranscriptExtractor {
                 ? `Total audio duration: ${duration.toFixed(3)} seconds\n\n${JSON.stringify(rawTranscript, null, 2)}`
                 : JSON.stringify(rawTranscript, null, 2);
 
-            const result = await this.callLlm(systemPrompt, userContent);
+            const result =
+                await this.callLlm(systemPrompt, userContent);
 
-            // LLMs are unreliable with numbers — pin start/end directly
-            // from the source segments so timestamps are always exact
-            const source = rawTranscript.segments ?? [];
-            if (source.length > 0 && result.segments?.length === source.length) {
+            // Pin timestamps from model segments
+            if (result.segments?.length === modelSegments.length) {
+
                 result.segments = result.segments.map((seg, i) => ({
                     ...seg,
-                    start: source[i].start,
-                    end:   source[i].end
+                    start: modelSegments[i].start,
+                    end:   modelSegments[i].end
                 }));
+
             }
 
             return result;
 
         }
 
-        // No timestamps — send raw text directly; LLM handles both
-        // segmentation (at every punctuation boundary) and analysis
+        // ── Path 3: no timestamps at all — LLM estimates from text ────────
         const systemPrompt =
             FULL_ANALYSIS_PROMPT.replace(
                 "[TOTAL_DURATION]",

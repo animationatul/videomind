@@ -5,43 +5,45 @@ import fs from "fs";
 dotenv.config();
 
 /*
-Used when the transcript already has word/segment timestamps (verbose_json).
-The LLM handles both segmentation and analysis since it has precise timing.
+Used when the transcript has real word/segment timestamps (verbose_json from gpt-4o-transcribe).
+The model's segment boundaries are the ground truth — do NOT merge or re-segment.
+The LLM only fills in speaker, dialogue, and speech event analysis.
 */
 const ANALYSIS_SYSTEM_PROMPT = `You are a professional video transcript analyzer.
 
-You receive a raw transcript from an audio file and the total audio duration in seconds.
-Your job is to split the speech into multiple timed segments and return structured data for each one.
+You receive a verbose transcript from an audio transcription model.
+It includes an array of segments, each with precise start/end timestamps and transcribed text.
+
+Your job is to analyze each segment and return the structured fields below.
+Do NOT merge, split, or re-segment. Each input segment becomes exactly one output segment.
+Copy start and end timestamps exactly as given — do not modify them.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SEGMENTATION
+FOR EACH SEGMENT RETURN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Use the provided word and segment timestamps to group content into segments.
-Break at sentence-ending punctuation: . ! ? । ॥ ؟ ！ 。 ？
-Target 20–60 seconds per segment. Never cut mid-sentence.
-First segment starts at 0.000. Last segment ends at [TOTAL_DURATION] exactly.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FOR EACH SEGMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. start / end       — from the timestamps
-2. speaker           — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
-3. dialogue          — clean: remove fillers, stammers, false starts
-4. raw_dialogue      — verbatim as spoken
-5. speech_events     — events within this segment's time window:
-     "stammer"     : syllable or word repetition
-     "false_start" : phrase abandoned mid-way
-     "retake"      : phrase repeated cleanly after a mistake
-     "filler"      : filler words/sounds ("um", "uh", "like", "you know")
+1. start         — copy exactly from input (do not change)
+2. end           — copy exactly from input (do not change)
+3. speaker       — "Speaker A", "Speaker B", etc. Single voice = "Speaker A"
+4. dialogue      — clean text: remove fillers, stammers, false starts. Keep all meaning.
+5. raw_dialogue  — verbatim as transcribed in the input segment
+6. speech_events — events within this segment:
+     "stammer"     : syllable or word repetition ("I-I think", "th-the")
+     "false_start" : phrase begun but abandoned mid-way
+     "retake"      : phrase repeated cleanly right after a mistake
+     "filler"      : filler words/sounds ("um", "uh", "er", "like", "you know")
      "em_dash"     : hard abrupt mid-sentence stop (—)
      "long_pause"  : silence gap > 0.8s within the segment
-     "breath"      : audible breath
+     "breath"      : audible breath before or during speech
    Each event: { "type", "start", "end", "text" }
-6. has_speech_issues — true if speech_events is non-empty
+   Estimate event timestamps proportionally within the segment's start–end window.
+7. has_speech_issues — true if speech_events is non-empty, otherwise false
 
-Return ONLY valid JSON. No markdown, no code blocks.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Return ONLY valid JSON. No markdown, no code blocks, no explanation.
 
 {
   "speakers": ["Speaker A"],
@@ -49,7 +51,7 @@ Return ONLY valid JSON. No markdown, no code blocks.
   "segments": [
     {
       "start": 0.0,
-      "end": 34.5,
+      "end": 4.2,
       "speaker": "Speaker A",
       "dialogue": "Let me show you how the settings panel works.",
       "raw_dialogue": "Let me— let me show you um how the settings panel works.",
